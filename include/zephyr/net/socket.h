@@ -173,7 +173,9 @@ extern "C" {
 
 /** Socket option for preventing certificates from being copied to the mbedTLS
  *  heap if possible. The option is only effective for DER certificates and is
- *  ignored for PEM certificates.
+ *  ignored for PEM certificates. This option has no effect when using wolfSSL
+ *  as the underlying TLS implementation, the cert data is always copied to the
+ *  heap in that case.
  */
 #define TLS_CERT_NOCOPY	       10
 /** TLS socket option to use with offloading. The option instructs the network
@@ -261,6 +263,13 @@ extern "C" {
  *  Kconfig option is enabled.
  */
 #define TLS_CERT_VERIFY_CALLBACK 20
+/** Write-only socket option to register a wolfSSL-style cert-verify callback.
+ *  The option accepts a pointer to a @ref tls_cert_verify_cb_wolfssl structure.
+ *
+ *  Only available when CONFIG_WOLFSSL_VERIFY_CALLBACK is enabled and
+ *  CONFIG_WOLFSSL is the active TLS backend.
+ */
+#define TLS_CERT_VERIFY_CALLBACK_WOLFSSL 21
 
 /* Valid values for @ref TLS_PEER_VERIFY option */
 #define TLS_PEER_VERIFY_NONE 0     /**< Peer verification disabled. */
@@ -300,6 +309,25 @@ struct tls_cert_verify_cb {
 	void *cb;
 
 	/** A pointer to an opaque context passed to the callback. */
+	void *ctx;
+};
+
+/** Data structure for @ref TLS_CERT_VERIFY_CALLBACK_WOLFSSL socket option.
+ *  Only available with CONFIG_WOLFSSL.
+ */
+struct tls_cert_verify_cb_wolfssl {
+	/** Callback with wolfSSL VerifyCallback signature:
+	 *  int callback(int preverify_ok, WOLFSSL_X509_STORE_CTX *ctx)
+	 *
+	 *  Stored as void* to avoid exposing wolfSSL types in the Zephyr
+	 *  public header. Cast to VerifyCallback internally.
+	 */
+	void *cb;
+
+	/** Application context pointer. Passed to the callback via
+	 *  WOLFSSL_X509_STORE_CTX->userCtx. If NULL, wolfSSL default
+	 *  behavior applies.
+	 */
 	void *ctx;
 };
 /** @} */ /* for @name */
