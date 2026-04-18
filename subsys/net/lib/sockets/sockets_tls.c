@@ -5776,6 +5776,21 @@ static ssize_t recvfrom_dtls_common_wolfssl(struct tls_context *ctx, void *buf,
 				return -ENOTCONN;
 			}
 
+			/* DTLS server parity with the Zephyr 3.7 wolfSSL patch.
+			 * BUFFER_ERROR here means a prior peek in
+			 * ztls_socket_data_check() already absorbed a fatal
+			 * alert and called tls_wolfssl_reset(); the SSL object
+			 * has no more usable data. Surfacing EAGAIN (not EIO)
+			 * lets the server recv path report "no data right now"
+			 * so the caller can wait for the next session, matching
+			 * 3.7's server behavior. 3.7 did not map this for the
+			 * client, so the client path is left unchanged.
+			 */
+			if (err == BUFFER_ERROR &&
+			    ctx->options.role == ZTLS_IS_SERVER) {
+				return -EAGAIN;
+			}
+
 			return -EIO;
 		}
 

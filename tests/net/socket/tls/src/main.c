@@ -2364,13 +2364,17 @@ ZTEST(net_socket_tls, test_poll_tls_pollerr)
 
 ZTEST(net_socket_tls, test_poll_dtls_pollerr)
 {
-#if defined(CONFIG_NET_SOCKETS_ENABLE_DTLS) && !defined(CONFIG_WOLFSSL)
+#if defined(CONFIG_NET_SOCKETS_ENABLE_DTLS)
 	uint8_t rx_buf;
 	int ret;
 	struct zsock_pollfd fds[1];
 	int optval;
 	socklen_t optlen = sizeof(optval);
+#if defined(CONFIG_WOLFSSL)
+	WOLFSSL *ssl_ctx;
+#else
 	mbedtls_ssl_context *ssl_ctx;
+#endif
 
 	test_prepare_dtls_connection(AF_INET6);
 
@@ -2378,9 +2382,14 @@ ZTEST(net_socket_tls, test_poll_dtls_pollerr)
 	fds[0].events = ZSOCK_POLLIN;
 
 	/* Get access to the underlying ssl context, and send alert. */
+#if defined(CONFIG_WOLFSSL)
+	ssl_ctx = ztls_get_wolfssl_context(c_sock);
+	SendAlert(ssl_ctx, alert_fatal, wolfssl_alert_protocol_version);
+#else
 	ssl_ctx = ztls_get_mbedtls_ssl_context(c_sock);
 	mbedtls_ssl_send_alert_message(ssl_ctx, MBEDTLS_SSL_ALERT_LEVEL_FATAL,
 				       MBEDTLS_SSL_ALERT_MSG_INTERNAL_ERROR);
+#endif
 
 	ret = zsock_poll(fds, 1, 100);
 	zassert_equal(ret, 1, "poll() should've report event");
@@ -2401,13 +2410,6 @@ ZTEST(net_socket_tls, test_poll_dtls_pollerr)
 	/* Small delay for the final alert exchange */
 	k_msleep(10);
 #else
-	/* Under CONFIG_WOLFSSL the DTLS server socket cannot recover
-	 * from a fatal alert with the current build: tls_wolfssl_reset()
-	 * cannot fully clear wssl internal handshake state without
-	 * wolfSSL_clear(), which is gated behind OPENSSL_EXTRA /
-	 * WOLFSSL_WPAS_SMALL (not enabled in the Zephyr build).
-	 * Revisit when enabling those flags is in scope.
-	 */
 	ztest_test_skip();
 #endif
 }
