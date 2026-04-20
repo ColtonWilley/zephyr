@@ -253,9 +253,10 @@ __net_socket struct tls_context {
 		bool dtls_handshake_on_connect;
 #endif /* CONFIG_NET_SOCKETS_ENABLE_DTLS */
 
-#if defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK)
+#if defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK) && \
+	!defined(CONFIG_WOLFSSL)
 		struct tls_cert_verify_cb cert_verify;
-#endif /* CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK */
+#endif /* CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK && !CONFIG_WOLFSSL */
 #if defined(CONFIG_WOLFSSL_VERIFY_CALLBACK)
 		struct tls_cert_verify_cb_wolfssl cert_verify_wolfssl;
 #endif /* CONFIG_WOLFSSL_VERIFY_CALLBACK */
@@ -3424,110 +3425,6 @@ static void tls_wolfssl_free_ztls_crt(struct ztls_x509_crt *crt)
 #endif
 }
 
-#if defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK)
-
-typedef int (*ztls_verify_cb_t)(void *ctx, struct ztls_x509_crt *crt,
-				int depth, uint32_t *flags);
-
-/*
- * Path #1: mbedTLS-style cert-verify callback.
- *
- * Installed as wolfSSL's per-cert verify callback when the customer
- * registered one via TLS_CERT_VERIFY_CALLBACK (and has not registered
- * a wolfSSL-style callback via TLS_CERT_VERIFY_CALLBACK_WOLFSSL).
- * Flow:
- *   wolfSSL invokes this -> we translate wolfSSL types into ztls
- *   (mbedtls_x509_crt-shaped) types -> invoke customer's callback ->
- *   translate the return value back to wolfSSL's expected convention.
- *
- * Also accumulates MBEDTLS_X509_BADCERT_* bits into
- * context->verify_result_flags so TLS_CERT_VERIFY_RESULT surfaces
- * them after an OPTIONAL-mode handshake.
- */
-static int tls_wolfssl_verify_cb_shim(int preverify_ok,
-				      WOLFSSL_X509_STORE_CTX *store)
-{
-	struct tls_context *context;
-	ztls_verify_cb_t user_cb;
-	WOLFSSL_X509 *x509 = NULL;
-	struct ztls_x509_crt crt;
-	uint32_t flags;
-	int ret, wolfssl_ret;
-
-	if (store == NULL || store->userCtx == NULL) {
-		return preverify_ok;
-	}
-
-	context = (struct tls_context *)store->userCtx;
-	user_cb = (ztls_verify_cb_t)context->options.cert_verify.cb;
-
-	if (store->error_depth < store->totalCerts) {
-		WOLFSSL_BUFFER_INFO *certBuf =
-			&store->certs[store->error_depth];
-
-		if (certBuf->buffer != NULL && certBuf->length > 0) {
-			x509 = wolfSSL_X509_d2i(NULL, certBuf->buffer,
-						 (int)certBuf->length);
-		}
-	}
-
-	if (x509 == NULL) {
-		/*
-		 * Could not parse certificate DER.  Invoke the user
-		 * callback with a zeroed cert and BADCERT_OTHER so the
-		 * callback can decide whether to abort or continue.
-		 * Same accept/reject logic as the normal path below.
-		 */
-		memset(&crt, 0, sizeof(crt));
-		flags = MBEDTLS_X509_BADCERT_OTHER;
-
-		ret = user_cb(context->options.cert_verify.ctx,
-			      &crt, store->error_depth, &flags);
-		context->verify_result_flags |= flags;
-
-		if (ret != 0) {
-			return 0;
-		} else if (flags == 0) {
-			return 1;
-		} else if (context->options.verify_level ==
-			   TLS_PEER_VERIFY_OPTIONAL) {
-			return 1;
-		}
-		return 0;
-	}
-
-	tls_wolfssl_populate_ztls_crt(x509, &crt);
-
-	flags = preverify_ok ? 0 :
-		tls_wolfssl_error_to_mbedtls_flags(store->error);
-
-	ret = user_cb(context->options.cert_verify.ctx,
-		      &crt, store->error_depth, &flags);
-
-	context->verify_result_flags |= flags;
-
-	/*
-	 * mbedTLS: return 0 = continue, non-zero = abort. Flags read/write.
-	 * wolfSSL: return 1 = accept, 0 = reject.
-	 */
-	if (ret != 0) {
-		wolfssl_ret = 0;
-	} else if (flags == 0) {
-		wolfssl_ret = 1;
-	} else if (context->options.verify_level == TLS_PEER_VERIFY_OPTIONAL) {
-		wolfssl_ret = 1;
-	} else {
-		wolfssl_ret = 0;
-	}
-
-	tls_wolfssl_free_ztls_crt(&crt);
-	wolfSSL_X509_free(x509);
-
-	return wolfssl_ret;
-}
-
-#endif /* CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK */
-
 /*
  * Path #3 (fallback): flag-only accumulator — no user callback.
  *
@@ -3667,14 +3564,10 @@ static int tls_wolfssl_set_verify(struct tls_context *context)
 
 	/*
 	 * Select the per-cert verify callback wolfSSL will invoke during
-	 * chain walk. Kconfig decides which customer-callback paths are
-	 * compiled in; CONFIG_WOLFSSL_VERIFY_CALLBACK takes precedence
-	 * when both are enabled, so TLS_CERT_VERIFY_CALLBACK state is
-	 * ignored in that build. The three possible callbacks are:
+	 * chain walk. Two possible callbacks on the wolfSSL backend:
 	 *
-	 *   tls_wolfssl_verify_cb_wrapper       (Path #2, wolfSSL-style)
-	 *   tls_wolfssl_verify_cb_shim          (Path #1, mbedTLS-style)
-	 *   tls_wolfssl_verify_accumulate_cb    (Path #3, flag-only)
+	 *   tls_wolfssl_verify_cb_wrapper       (wolfSSL-style, customer cb)
+	 *   tls_wolfssl_verify_accumulate_cb    (flag-only, default)
 	 *
 	 * wolfSSL_SetCertCbCtx plants our tls_context so whichever cb is
 	 * chosen can reach verify_result_flags. The wolfSSL-style wrapper
@@ -3693,20 +3586,8 @@ static int tls_wolfssl_set_verify(struct tls_context *context)
 		wolfSSL_SetCertCbCtx(context->wssl, context);
 		cb = tls_wolfssl_verify_accumulate_cb;
 	}
-#elif defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK)
-	if (context->options.cert_verify.cb != NULL) {
-		/* Customer registered a mbedTLS-style callback. */
-		wolfSSL_SetCertCbCtx(context->wssl, context);
-		cb = tls_wolfssl_verify_cb_shim;
-	} else {
-		/* mbedTLS-style option built in, but customer did not
-		 * register one — use the flag-only accumulator.
-		 */
-		wolfSSL_SetCertCbCtx(context->wssl, context);
-		cb = tls_wolfssl_verify_accumulate_cb;
-	}
 #else
-	/* Neither customer-callback path built in — flag-only only. */
+	/* No customer-callback path built in — flag-only only. */
 	wolfSSL_SetCertCbCtx(context->wssl, context);
 	cb = tls_wolfssl_verify_accumulate_cb;
 #endif
