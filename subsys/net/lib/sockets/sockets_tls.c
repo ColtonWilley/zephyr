@@ -4822,14 +4822,28 @@ static int tls_opt_dtls_role_set(struct tls_context *context,
 
 /*
  * Setter for TLS_CERT_VERIFY_CALLBACK — the mbedTLS-style cert-verify
- * callback option. Customer's callback receives mbedtls_x509_crt*
- * (aliased to ztls_x509_crt under CONFIG_WOLFSSL via
- * include/zephyr/net/tls_verify.h). Use
- * tls_opt_cert_verify_callback_wolfssl_set below for the wolfSSL-style
- * option; that path takes precedence when CONFIG_WOLFSSL_VERIFY_CALLBACK
- * is also enabled.
+ * callback option. Only honored by the mbedTLS backend; the wolfSSL arm
+ * returns -ENOTSUP so applications cannot register a callback that
+ * would never fire. wolfSSL consumers should use
+ * TLS_CERT_VERIFY_CALLBACK_WOLFSSL (CONFIG_WOLFSSL_VERIFY_CALLBACK)
+ * instead.
  */
 #if defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK)
+#if defined(CONFIG_WOLFSSL)
+static int tls_opt_cert_verify_callback_set(struct tls_context *context,
+					    const void *optval,
+					    socklen_t optlen)
+{
+	ARG_UNUSED(context);
+	ARG_UNUSED(optval);
+	ARG_UNUSED(optlen);
+
+	NET_ERR("TLS_CERT_VERIFY_CALLBACK is not supported by the wolfSSL "
+		"backend; use TLS_CERT_VERIFY_CALLBACK_WOLFSSL");
+
+	return -ENOTSUP;
+}
+#else /* CONFIG_WOLFSSL (mbedTLS backend) */
 static int tls_opt_cert_verify_callback_set(struct tls_context *context,
 					    const void *optval,
 					    socklen_t optlen)
@@ -4853,6 +4867,7 @@ static int tls_opt_cert_verify_callback_set(struct tls_context *context,
 
 	return 0;
 }
+#endif /* CONFIG_WOLFSSL */
 #else /* CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK */
 static int tls_opt_cert_verify_callback_set(struct tls_context *context,
 					    const void *optval,
