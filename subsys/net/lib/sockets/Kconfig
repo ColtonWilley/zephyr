@@ -298,8 +298,9 @@ config WOLFSSL_VERIFY_CALLBACK
 	  CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK.
 
 	  When a wolfSSL-style callback is registered, TLS_CERT_VERIFY_RESULT
-	  reports only hostname mismatch flags. Certificate chain errors
-	  are delegated to the wolfSSL-style callback.
+	  still returns accumulated MBEDTLS_X509_BADCERT_* flags for chain
+	  errors observed during verification; the callback additionally
+	  controls whether the handshake proceeds.
 
 config NET_SOCKETS_OFFLOAD
 	bool "Offload Socket APIs"

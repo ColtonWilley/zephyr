@@ -293,9 +293,6 @@ __net_socket struct tls_context {
 	/** Accumulated mbedTLS-compatible verify result flags. */
 	uint32_t verify_result_flags;
 
-	/** Post-handshake hostname mismatch flag (VERIFY_OPTIONAL). */
-	uint8_t hostname_verify_err;
-
 #ifndef NO_PSK
 	/* The Pre Shared Key to be used */
 	byte *psk;
@@ -2275,7 +2272,6 @@ static int tls_wolfssl_reset(struct tls_context *context)
 	k_sem_reset(&context->tls_established);
 
 	context->verify_result_flags = 0;
-	context->hostname_verify_err = 0;
 	context->error = 0;
 
 #if defined(CONFIG_NET_SOCKETS_ENABLE_DTLS)
@@ -2730,8 +2726,7 @@ static int tls_wolfssl_set_hostname(struct tls_context *context)
 		 *
 		 * Skip for VERIFY_OPTIONAL — wolfSSL_check_domain_name
 		 * makes CN mismatch fatal, which contradicts OPTIONAL
-		 * semantics.  The verify accumulator callback already
-		 * records flags for OPTIONAL mode.
+		 * semantics.
 		 */
 		if (context->options.role == ZTLS_IS_CLIENT &&
 		    context->options.verify_level != TLS_PEER_VERIFY_OPTIONAL) {
@@ -2750,7 +2745,10 @@ static int tls_wolfssl_set_hostname(struct tls_context *context)
 			return -EINVAL;
 		}
 
-		/* Skip for VERIFY_OPTIONAL — handled post-handshake. */
+		/* Skip for VERIFY_OPTIONAL — wolfSSL_check_domain_name
+		 * makes CN mismatch fatal, which contradicts OPTIONAL
+		 * semantics.
+		 */
 		if (context->options.verify_level != TLS_PEER_VERIFY_OPTIONAL) {
 			if (wolfSSL_check_domain_name(context->wssl,
 				(const char *)context->host_name) != WOLFSSL_SUCCESS) {
@@ -2947,7 +2945,6 @@ static int tls_wolfssl_set_verify(struct tls_context *context)
 	}
 
 	context->verify_result_flags = 0;
-	context->hostname_verify_err = 0;
 
 	/*
 	 * Select the per-cert verify callback wolfSSL will invoke during
