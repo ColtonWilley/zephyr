@@ -266,12 +266,18 @@ config NET_SOCKETS_TLS_MAX_CLIENT_SESSION_COUNT
 	  used for TLS/DTLS session resumption.
 
 config NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK
-	bool "TLS certificate verification callback support"
+	bool "TLS certificate verification callback support (mbedTLS backend only)"
 	depends on NET_SOCKETS_SOCKOPT_TLS
 	help
-	  This option controls whether TLS_CERT_VERIFY_CALLBACK TLS socket option
-	  is available to use. It allows to register a certificate verification
-	  callback, which is called by the TLS backend during the TLS handshake.
+	  This option controls whether the TLS_CERT_VERIFY_CALLBACK TLS
+	  socket option is available to use. When set, applications can
+	  register a certificate verification callback that is invoked by
+	  the TLS backend during the handshake.
+
+	  This option is only honored by the mbedTLS backend. On the
+	  wolfSSL backend, setsockopt(TLS_CERT_VERIFY_CALLBACK) returns
+	  -ENOTSUP. wolfSSL users should use TLS_CERT_VERIFY_CALLBACK_WOLFSSL
+	  (CONFIG_WOLFSSL_VERIFY_CALLBACK) instead.
 
 config WOLFSSL_VERIFY_CALLBACK
 	bool "wolfSSL-style cert-verify callback"
