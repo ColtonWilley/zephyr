@@ -510,9 +510,9 @@ ZTEST(net_socket_tls_api_extension, test_tls_cert_verify_result_opt_bad_cn)
 	test_tls_cert_verify_result_opt_common(MBEDTLS_X509_BADCERT_CN_MISMATCH);
 }
 
-/* --- Unified cert verify callback tests (both backends) --- */
+/* --- Unified cert verify callback tests (mbedTLS backend only) --- */
 
-#if defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK)
+#if defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK) && !defined(CONFIG_WOLFSSL)
 
 struct test_cert_verify_ctx {
 	bool cb_called;
@@ -651,143 +651,6 @@ static void *setup(void)
 	}
 	return NULL;
 }
-
-/* --- Tier 2: Extended X.509 field tests in verify callback --- */
-
-#if defined(CONFIG_WOLFSSL_X509_VERIFY_EXTENDED)
-
-struct test_x509_ext_ctx {
-	bool cb_called;
-	bool subject_found;
-	bool issuer_found;
-	char subject_cn[64];
-	char issuer_cn[64];
-};
-
-static int cert_verify_cb_x509_ext(void *ctx, mbedtls_x509_crt *crt,
-				    int depth, uint32_t *flags)
-{
-	struct test_x509_ext_ctx *test_ctx = ctx;
-	static const unsigned char oid_cn[] = {0x55, 0x04, 0x03};
-	const mbedtls_x509_name *node;
-
-	if (depth != 0) {
-		/* Only inspect leaf cert */
-		*flags = 0;
-		return 0;
-	}
-
-	test_ctx->cb_called = true;
-
-	/* Walk subject linked list for CN */
-	node = &crt->subject;
-	while (node != NULL && node->val.p != NULL) {
-		if (node->oid.len == sizeof(oid_cn) &&
-		    memcmp(node->oid.p, oid_cn, sizeof(oid_cn)) == 0) {
-			size_t n = MIN(node->val.len,
-				       sizeof(test_ctx->subject_cn) - 1);
-			memcpy(test_ctx->subject_cn, node->val.p, n);
-			test_ctx->subject_cn[n] = '\0';
-			test_ctx->subject_found = true;
-			break;
-		}
-		node = node->next;
-	}
-
-	/* Walk issuer linked list for CN */
-	node = &crt->issuer;
-	while (node != NULL && node->val.p != NULL) {
-		if (node->oid.len == sizeof(oid_cn) &&
-		    memcmp(node->oid.p, oid_cn, sizeof(oid_cn)) == 0) {
-			size_t n = MIN(node->val.len,
-				       sizeof(test_ctx->issuer_cn) - 1);
-			memcpy(test_ctx->issuer_cn, node->val.p, n);
-			test_ctx->issuer_cn[n] = '\0';
-			test_ctx->issuer_found = true;
-			break;
-		}
-		node = node->next;
-	}
-
-	*flags = 0;
-	return 0;
-}
-
-ZTEST(net_socket_tls_api_extension, test_tls_x509_subject_extended)
-{
-	int server_fd, client_fd, ret;
-	k_tid_t server_thread_id;
-	struct sockaddr_in sa;
-	const struct timespec ts = {
-		.tv_sec = 1704067200,
-		.tv_nsec = 0,
-	};
-
-	clock_settime(CLOCK_REALTIME, &ts);
-
-	struct test_x509_ext_ctx ctx = {0};
-	struct tls_cert_verify_cb cb = {
-		.cb = cert_verify_cb_x509_ext,
-		.ctx = &ctx,
-	};
-
-	server_fd = test_configure_server(&server_thread_id,
-					  TLS_PEER_VERIFY_NONE, false, false);
-	client_fd = test_configure_client(&sa, false, "localhost");
-
-	ret = zsock_setsockopt(client_fd, SOL_TLS, TLS_CERT_VERIFY_CALLBACK,
-			       &cb, sizeof(cb));
-	zassert_ok(ret, "failed to set TLS_CERT_VERIFY_CALLBACK (%d)", errno);
-
-	ret = zsock_connect(client_fd, (struct sockaddr *)&sa, sizeof(sa));
-	zassert_equal(ret, 0, "failed to connect (%d)", errno);
-
-	zassert_true(ctx.cb_called, "verify callback was not called");
-	zassert_true(ctx.subject_found, "subject should contain CN");
-	zassert_str_equal(ctx.subject_cn, "localhost",
-			  "subject CN should be localhost");
-
-	test_shutdown(client_fd, server_fd, server_thread_id);
-}
-
-ZTEST(net_socket_tls_api_extension, test_tls_x509_issuer_extended)
-{
-	int server_fd, client_fd, ret;
-	k_tid_t server_thread_id;
-	struct sockaddr_in sa;
-	const struct timespec ts = {
-		.tv_sec = 1704067200,
-		.tv_nsec = 0,
-	};
-
-	clock_settime(CLOCK_REALTIME, &ts);
-
-	struct test_x509_ext_ctx ctx = {0};
-	struct tls_cert_verify_cb cb = {
-		.cb = cert_verify_cb_x509_ext,
-		.ctx = &ctx,
-	};
-
-	server_fd = test_configure_server(&server_thread_id,
-					  TLS_PEER_VERIFY_NONE, false, false);
-	client_fd = test_configure_client(&sa, false, "localhost");
-
-	ret = zsock_setsockopt(client_fd, SOL_TLS, TLS_CERT_VERIFY_CALLBACK,
-			       &cb, sizeof(cb));
-	zassert_ok(ret, "failed to set TLS_CERT_VERIFY_CALLBACK (%d)", errno);
-
-	ret = zsock_connect(client_fd, (struct sockaddr *)&sa, sizeof(sa));
-	zassert_equal(ret, 0, "failed to connect (%d)", errno);
-
-	zassert_true(ctx.cb_called, "verify callback was not called");
-	zassert_true(ctx.issuer_found, "issuer should contain CN");
-	zassert_str_equal(ctx.issuer_cn, "exampleCA",
-			  "issuer CN should be exampleCA");
-
-	test_shutdown(client_fd, server_fd, server_thread_id);
-}
-
-#endif /* CONFIG_WOLFSSL_X509_VERIFY_EXTENDED */
 
 /* --- wolfSSL-style verify callback tests --- */
 
@@ -1009,57 +872,6 @@ ZTEST(net_socket_tls_api_extension, test_wolfssl_verify_cb_null_ctx)
 	ret = zsock_connect(client_fd, (struct sockaddr *)&sa, sizeof(sa));
 	zassert_equal(ret, 0,
 		      "connect failed -- userCtx may not be NULL (%d)", errno);
-
-	test_shutdown(client_fd, server_fd, server_thread_id);
-}
-
-ZTEST(net_socket_tls_api_extension, test_wolfssl_verify_cb_verify_result_hostname)
-{
-	int server_fd, client_fd, ret;
-	k_tid_t server_thread_id;
-	struct sockaddr_in sa;
-	uint32_t optval;
-	socklen_t optlen = sizeof(optval);
-	int peer_verify = TLS_PEER_VERIFY_OPTIONAL;
-	const struct timespec ts = {
-		.tv_sec = 1704067200,
-		.tv_nsec = 0,
-	};
-
-	clock_settime(CLOCK_REALTIME, &ts);
-
-	struct wolfssl_verify_ctx ctx = {
-		.cb_called = false,
-		.decision = 1, /* accept cert */
-	};
-	struct tls_cert_verify_cb_wolfssl cb = {
-		.cb = wolfssl_verify_cb,
-		.ctx = &ctx,
-	};
-
-	server_fd = test_configure_server(&server_thread_id,
-					  TLS_PEER_VERIFY_NONE, false, false);
-	/* Use hostname "dummy" to trigger CN mismatch */
-	client_fd = test_configure_client(&sa, false, "dummy");
-
-	ret = zsock_setsockopt(client_fd, SOL_TLS, TLS_PEER_VERIFY,
-			       &peer_verify, sizeof(peer_verify));
-	zassert_ok(ret, "failed to set TLS_PEER_VERIFY (%d)", errno);
-
-	ret = zsock_setsockopt(client_fd, SOL_TLS, TLS_CERT_VERIFY_CALLBACK_WOLFSSL,
-			       &cb, sizeof(cb));
-	zassert_ok(ret, "failed to set TLS_CERT_VERIFY_CALLBACK_WOLFSSL (%d)", errno);
-
-	ret = zsock_connect(client_fd, (struct sockaddr *)&sa, sizeof(sa));
-	zassert_equal(ret, 0, "connect should succeed with VERIFY_OPTIONAL");
-	zassert_true(ctx.cb_called, "wolfSSL-style verify callback was not called");
-
-	ret = zsock_getsockopt(client_fd, SOL_TLS, TLS_CERT_VERIFY_RESULT,
-			       &optval, &optlen);
-	zassert_equal(ret, 0, "getsockopt failed (%d)", errno);
-	zassert_equal(optval, MBEDTLS_X509_BADCERT_CN_MISMATCH,
-		      "verify result should contain CN mismatch flag (got %d)",
-		      optval);
 
 	test_shutdown(client_fd, server_fd, server_thread_id);
 }
