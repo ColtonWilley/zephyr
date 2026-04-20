@@ -2770,46 +2770,6 @@ static int tls_wolfssl_set_hostname(struct tls_context *context)
 	return 0;
 }
 
-#if defined(KEEP_PEER_CERT)
-/* Post-handshake hostname verification for VERIFY_OPTIONAL clients.
- *
- * wolfSSL_check_domain_name() makes CN mismatch fatal, so we skip it
- * for OPTIONAL and verify manually after the handshake succeeds.
- *
- * Limitation: because the verify callback runs during the handshake,
- * it never sees MBEDTLS_X509_BADCERT_CN_MISMATCH for OPTIONAL mode.
- * An application callback cannot inspect, clear, or override hostname
- * mismatch the way it could with mbedTLS. This is inherent to
- * wolfSSL's lack of a "soft" hostname check. */
-static int tls_wolfssl_verify_hostname_posthandshake(struct tls_context *context)
-{
-	WOLFSSL_X509 *peer;
-
-	if (!context->options.is_hostname_set || context->host_name == NULL) {
-		return 0;
-	}
-
-	peer = wolfSSL_get_peer_certificate(context->wssl);
-	if (peer == NULL) {
-		return 0;
-	}
-
-	/* wolfSSL_X509_check_host handles SAN/CN matching with wildcard
-	 * support. Returns WOLFSSL_SUCCESS on match. chklen=0 means use
-	 * strlen(chk) internally. */
-	if (wolfSSL_X509_check_host(peer,
-			(const char *)context->host_name, 0,
-			0, NULL) != WOLFSSL_SUCCESS) {
-		context->hostname_verify_err = 1;
-		context->verify_result_flags |= MBEDTLS_X509_BADCERT_CN_MISMATCH;
-	}
-
-	/* Don't free — KEEP_PEER_CERT returns &ssl->peerCert, not a heap alloc */
-
-	return 0;
-}
-#endif
-
 /* Map wolfSSL verify error to mbedTLS flag bits. */
 static uint32_t tls_wolfssl_error_to_mbedtls_flags(int error)
 {
@@ -4400,12 +4360,6 @@ int ztls_connect_ctx(struct tls_context *ctx, const struct sockaddr *addr,
 			goto error;
 		}
 
-#if defined(KEEP_PEER_CERT)
-		if (ctx->options.verify_level == TLS_PEER_VERIFY_OPTIONAL) {
-			tls_wolfssl_verify_hostname_posthandshake(ctx);
-		}
-#endif
-
 		tls_session_store(ctx, addr, addrlen);
 #else
 		ret = tls_mbedtls_init(ctx, false);
@@ -4652,11 +4606,6 @@ static ssize_t sendto_dtls_client_wolfssl(struct tls_context *ctx,
 			goto error;
 		}
 
-#if defined(KEEP_PEER_CERT)
-		if (ctx->options.verify_level == TLS_PEER_VERIFY_OPTIONAL) {
-			tls_wolfssl_verify_hostname_posthandshake(ctx);
-		}
-#endif
 		ctx->error = 0;
 
 		tls_session_store(ctx, &ctx->dtls_peer_addr,
@@ -5724,13 +5673,6 @@ static int ztls_socket_data_check(struct tls_context *ctx)
 				return 0;
 			}
 
-#if defined(KEEP_PEER_CERT)
-			if (ctx->options.role == ZTLS_IS_CLIENT &&
-			    ctx->options.verify_level ==
-					TLS_PEER_VERIFY_OPTIONAL) {
-				tls_wolfssl_verify_hostname_posthandshake(ctx);
-			}
-#endif
 			/* Socket ready to use again. */
 			ctx->error = 0;
 			return 0;
