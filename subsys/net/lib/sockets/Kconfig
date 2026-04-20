@@ -273,24 +273,6 @@ config NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK
 	  is available to use. It allows to register a certificate verification
 	  callback, which is called by the TLS backend during the TLS handshake.
 
-config WOLFSSL_X509_VERIFY_EXTENDED
-	bool "Extended X.509 certificate fields in verify callbacks"
-	depends on WOLFSSL
-	depends on NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK
-	help
-	  Enable extended translation of X.509 certificate fields in TLS
-	  verify callbacks when using the wolfSSL backend. When enabled,
-	  the verify callback receives issuer, subject, SANs, signature
-	  OID, and public key data in mbedTLS-compatible format.
-
-	  Without this option, only basic fields are available (raw DER,
-	  version, serial, validity dates, CA flag). Applications that
-	  inspect certificate identity fields in verify callbacks should
-	  enable this.
-
-	  This option enables OPENSSL_EXTRA_X509_SMALL in the wolfSSL build,
-	  adding approximately 15KB to the binary.
-
 config WOLFSSL_VERIFY_CALLBACK
 	bool "wolfSSL-style cert-verify callback"
 	depends on WOLFSSL
@@ -312,16 +294,6 @@ config WOLFSSL_VERIFY_CALLBACK
 	  When a wolfSSL-style callback is registered, TLS_CERT_VERIFY_RESULT
 	  reports only hostname mismatch flags. Certificate chain errors
 	  are delegated to the wolfSSL-style callback.
-
-config WOLFSSL_VERIFY_CB_ALL_CERTS
-	bool "Invoke verify callback for all chain certificates"
-	depends on WOLFSSL_VERIFY_CALLBACK || NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK
-	depends on WOLFSSL
-	help
-	  By default the verify callback is only called for the peer leaf
-	  certificate (on success) or the first failing certificate (on
-	  error). Enable this to receive a callback for every intermediate
-	  certificate in the chain.
 
 config NET_SOCKETS_OFFLOAD
 	bool "Offload Socket APIs"
