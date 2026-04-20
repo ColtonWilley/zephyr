@@ -2498,7 +2498,7 @@ ZTEST(net_socket_tls, test_dtls_bad_cred)
 
 ZTEST(net_socket_tls, test_tls13_psk_handshake)
 {
-#if !defined(WOLFSSL_TLS13)
+#if !defined(WOLFSSL_TLS13) || defined(CONFIG_WOLFSSL)
 	ztest_test_skip();
 	return;
 #else

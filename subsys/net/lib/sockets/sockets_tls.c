@@ -3732,7 +3732,7 @@ static int tls_wolfssl_set_ciphersuites(struct tls_context *context)
 {
 	int i = 0;
 	int cipher_cnt = 0;
-	int tmp = 0;
+	uint32_t tmp = 0;
 	uint16_t sh = 0;
 	byte *cs = NULL;
 	byte *cs_bytes = NULL;
@@ -4363,6 +4363,12 @@ static int tls_opt_alpn_list_set(struct tls_context *context,
 	memcpy(context->options.alpn_list, optval, optlen);
 	context->options.alpn_list[alpn_cnt] = NULL;
 
+#if defined(CONFIG_WOLFSSL) && defined(HAVE_ALPN)
+	if (context->wssl != NULL) {
+		return tls_wolfssl_set_alpn(context);
+	}
+#endif
+
 	return 0;
 }
 
@@ -4414,7 +4420,7 @@ static int tls_opt_dtls_handshake_timeout_set(struct tls_context *context,
 	 */
 #if defined(CONFIG_WOLFSSL)
 	if (context->wssl != NULL) {
-		return tls_wolfssl_set_options(context);
+		return tls_wolfssl_set_dtls_timeouts(context);
 	}
 #else
 	mbedtls_ssl_conf_handshake_timeout(&context->config,
@@ -6370,7 +6376,12 @@ static int ztls_socket_data_check(struct tls_context *ctx)
 
 			ret = tls_wolfssl_init(ctx, is_server);
 			if (ret < 0) {
-				return ret;
+				/* Collapse to -ENOMEM to match the mbedTLS arm
+				 * for backend parity on the poll-path init-failure
+				 * report; more specific errors are intentionally
+				 * discarded here.
+				 */
+				return -ENOMEM;
 			}
 		}
 
