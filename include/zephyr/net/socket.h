@@ -260,7 +260,9 @@ extern "C" {
  *  certificates and decide whether to proceed or abort the handshake.
  *
  *  The option is only available if CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK
- *  Kconfig option is enabled.
+ *  Kconfig option is enabled AND the mbedTLS backend is in use. Under
+ *  CONFIG_WOLFSSL, setsockopt(TLS_CERT_VERIFY_CALLBACK) returns -ENOTSUP;
+ *  use TLS_CERT_VERIFY_CALLBACK_WOLFSSL instead.
  */
 #define TLS_CERT_VERIFY_CALLBACK 20
 /** Write-only socket option to register a wolfSSL-style cert-verify callback.
