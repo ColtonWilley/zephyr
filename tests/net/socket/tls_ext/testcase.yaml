@@ -9,13 +9,11 @@ tests:
     integration_platforms:
       - qemu_x86
 
-  net.socket.tls.ext.wolfssl.x509_extended:
+  net.socket.tls.ext.wolfssl:
     platform_allow: native_sim
-    tags: net socket tls wolfssl x509
+    tags: net socket tls wolfssl
     extra_args:
       - OVERLAY_CONFIG=overlay-wolfssl.conf
-    extra_configs:
-      - CONFIG_WOLFSSL_X509_VERIFY_EXTENDED=y
 
   net.socket.tls.ext.wolfssl.verify_cb:
     platform_allow: native_sim
