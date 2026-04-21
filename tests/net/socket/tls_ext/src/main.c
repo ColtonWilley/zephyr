@@ -507,19 +507,7 @@ ZTEST(net_socket_tls_api_extension, test_tls_cert_verify_result_opt_ok)
 
 ZTEST(net_socket_tls_api_extension, test_tls_cert_verify_result_opt_bad_cn)
 {
-#if defined(CONFIG_WOLFSSL)
-	/* Under wolfSSL, TLS_PEER_VERIFY_OPTIONAL silently accepts
-	 * hostname mismatches during the handshake, and the
-	 * post-handshake hostname check helper that used to record the
-	 * mismatch into verify_result_flags was removed (it leaked and
-	 * had no 3.7 parity). Skip this assertion here; a future
-	 * re-introduction of the helper (gated behind OPENSSL_EXTRA_X509_
-	 * SMALL) will un-skip this test.
-	 */
-	ztest_test_skip();
-#else
 	test_tls_cert_verify_result_opt_common(MBEDTLS_X509_BADCERT_CN_MISMATCH);
-#endif
 }
 
 /* --- Unified cert verify callback tests (mbedTLS backend only) --- */

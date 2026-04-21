@@ -334,10 +334,7 @@ static struct tls_context tls_contexts[CONFIG_NET_SOCKETS_TLS_MAX_CONTEXTS];
 
 static struct tls_session_cache client_cache[CONFIG_NET_SOCKETS_TLS_MAX_CLIENT_SESSION_COUNT];
 
-/* Guards all reads/writes of client_cache across both backends. Held for the
- * slot-selection / session-buffer ownership transitions only; never across
- * socket I/O.
- */
+/* Guards client_cache. Never held across socket I/O. */
 static K_MUTEX_DEFINE(client_cache_lock);
 
 #if defined(MBEDTLS_SSL_CACHE_C)
@@ -623,7 +620,6 @@ static struct tls_context *tls_clone(struct tls_context *source_tls)
 
 #if defined(CONFIG_WOLFSSL)
 	if (target_tls->options.is_hostname_set && source_tls->host_name) {
-		/* +1 for NUL terminator — wolfSSL APIs require C strings */
 		target_tls->host_name = XMALLOC(source_tls->host_len + 1,
 						NULL, DYNAMIC_TYPE_TMP_BUFFER);
 		if (target_tls->host_name == NULL) {
@@ -672,9 +668,8 @@ static int tls_release(struct tls_context *tls)
 	}
 #endif
 	if (tls->wssl != NULL) {
-		/* Only send close_notify if the handshake completed.
-		 * Calling wolfSSL_shutdown on a connection where the
-		 * handshake was never finished can corrupt global state.
+		/* wolfSSL_shutdown before handshake completion can corrupt
+		 * global state.
 		 */
 		if (wolfSSL_is_init_finished(tls->wssl)) {
 			(void)wolfSSL_shutdown(tls->wssl);
@@ -902,11 +897,7 @@ static void tls_session_purge(void)
 #endif /* CONFIG_MBEDTLS */
 
 #if defined(CONFIG_WOLFSSL)
-/* Pick or allocate a client_cache entry for the given peer address, freeing
- * any previous session buffer it held. Mirrors the mbedTLS tls_session_save
- * slot-selection policy: prefer empty slots, fall back to the entry with
- * the most recent timestamp. Caller must hold client_cache_lock.
- */
+/* Caller must hold client_cache_lock. */
 static struct tls_session_cache *tls_wolfssl_session_entry_reserve(
 	const struct sockaddr *peer_addr)
 {
@@ -1044,10 +1035,7 @@ static void tls_session_restore(struct tls_context *context,
 		return;
 	}
 
-	/* Copy the serialized buffer while holding the lock so that
-	 * deserialization (which can be slow/allocate) happens without
-	 * blocking other cache users.
-	 */
+	/* Copy under lock so deserialization runs without blocking others. */
 	serialized_copy = XMALLOC(entry->session_len, NULL,
 				  DYNAMIC_TYPE_TMP_BUFFER);
 	if (serialized_copy == NULL) {
@@ -1263,9 +1251,8 @@ static int dtls_wolf_rx(WOLFSSL *ssl, char *buf, int len, void *ctx)
 
 			if (wolfSSL_dtls_set_peer(ssl, (void *)&addr,
 					(unsigned int)addrlen) != WOLFSSL_SUCCESS) {
-				/* Roll back stored peer address so
-				 * dtls_is_peer_addr_valid won't
-				 * falsely match on retry.
+				/* Roll back stored peer so retry doesn't
+				 * falsely match.
 				 */
 				tls_ctx->dtls_peer_addrlen = 0;
 				return WOLFSSL_CBIO_ERR_GENERAL;
@@ -1633,8 +1620,6 @@ static int tls_set_psk(struct tls_context *tls,
 	tls->psk_id = (byte *)XMALLOC(
 			psk_id->len + 1, NULL, DYNAMIC_TYPE_TMP_BUFFER);
 	if (tls->psk_id == NULL) {
-		/* Clean up the just-allocated PSK to keep
-		 * context consistent. */
 		wc_ForceZero(tls->psk, tls->psk_len);
 		XFREE(tls->psk, NULL, DYNAMIC_TYPE_TMP_BUFFER);
 		tls->psk = NULL;
@@ -2715,21 +2700,11 @@ static int tls_wolfssl_set_session_cache_mode(struct tls_context *context)
 static int tls_wolfssl_set_hostname(struct tls_context *context)
 {
 	if (!context->options.is_hostname_set) {
-		/* No explicit hostname set.  For TLS clients, enable
-		 * hostname verification with an empty domain name so
-		 * that the peer certificate CN/SAN check runs (and
-		 * always mismatches).  This matches mbedTLS behaviour
-		 * where tls_mbedtls_init() calls
-		 * mbedtls_ssl_set_hostname(&ssl, "") for the same
-		 * reason: without it, hostname verification is skipped
-		 * entirely and a MITM could present any valid cert.
-		 *
-		 * Skip for VERIFY_OPTIONAL — wolfSSL_check_domain_name
-		 * makes CN mismatch fatal, which contradicts OPTIONAL
-		 * semantics.
+		/* Empty domain forces CN/SAN mismatch for unset hostname —
+		 * MITM protection matching mbedTLS's
+		 * mbedtls_ssl_set_hostname(&ssl, "").
 		 */
-		if (context->options.role == ZTLS_IS_CLIENT &&
-		    context->options.verify_level != TLS_PEER_VERIFY_OPTIONAL) {
+		if (context->options.role == ZTLS_IS_CLIENT) {
 			if (wolfSSL_check_domain_name(context->wssl, "")
 			    != WOLFSSL_SUCCESS) {
 				return -EINVAL;
@@ -2745,20 +2720,12 @@ static int tls_wolfssl_set_hostname(struct tls_context *context)
 			return -EINVAL;
 		}
 
-		/* Skip for VERIFY_OPTIONAL — wolfSSL_check_domain_name
-		 * makes CN mismatch fatal, which contradicts OPTIONAL
-		 * semantics.
-		 */
-		if (context->options.verify_level != TLS_PEER_VERIFY_OPTIONAL) {
-			if (wolfSSL_check_domain_name(context->wssl,
-				(const char *)context->host_name) != WOLFSSL_SUCCESS) {
-				return -EINVAL;
-			}
+		if (wolfSSL_check_domain_name(context->wssl,
+			(const char *)context->host_name) != WOLFSSL_SUCCESS) {
+			return -EINVAL;
 		}
 	} else {
-		/* Server: CN/SAN check of client cert during mutual auth.
-		 * No-op when verify_level is NONE (verifyNone gate in wolfSSL).
-		 * Do NOT call UseSNI — mbedTLS doesn't do server-side SNI. */
+		/* mbedTLS doesn't do server-side SNI; skip UseSNI here. */
 		if (wolfSSL_check_domain_name(context->wssl,
 			(const char *)context->host_name) != WOLFSSL_SUCCESS) {
 			return -EINVAL;
@@ -2811,18 +2778,6 @@ static uint32_t tls_wolfssl_error_to_mbedtls_flags(int error)
 	}
 }
 
-/*
- * Fallback flag-only accumulator — no customer callback.
- *
- * Installed as wolfSSL's per-cert verify callback when the application
- * has not registered a wolfSSL-style callback via
- * TLS_CERT_VERIFY_CALLBACK_WOLFSSL. Just accumulates
- * MBEDTLS_X509_BADCERT_* bits into context->verify_result_flags so
- * TLS_CERT_VERIFY_RESULT still reports what went wrong after an
- * OPTIONAL-mode handshake. For TLS_PEER_VERIFY_OPTIONAL, returns 1 so
- * the handshake continues; otherwise returns the incoming preverify_ok
- * unchanged.
- */
 static int tls_wolfssl_verify_accumulate_cb(int preverify_ok,
 					     WOLFSSL_X509_STORE_CTX *store)
 {
@@ -2839,9 +2794,7 @@ static int tls_wolfssl_verify_accumulate_cb(int preverify_ok,
 			tls_wolfssl_error_to_mbedtls_flags(store->error);
 	}
 
-	/* For OPTIONAL verification, record the failure flags but
-	 * allow the handshake to continue regardless of the result.
-	 */
+	/* OPTIONAL: return 1 so handshake continues after recording flags. */
 	if (context->options.verify_level == TLS_PEER_VERIFY_OPTIONAL) {
 		return 1;
 	}
@@ -2850,22 +2803,6 @@ static int tls_wolfssl_verify_accumulate_cb(int preverify_ok,
 }
 
 #if defined(CONFIG_WOLFSSL_VERIFY_CALLBACK)
-/*
- * wolfSSL-style cert-verify callback wrapper.
- *
- * Installed as wolfSSL's per-cert verify callback when the customer
- * registered one via TLS_CERT_VERIFY_CALLBACK_WOLFSSL. The customer's
- * callback receives raw WOLFSSL_X509_STORE_CTX* — no struct translation,
- * no dependency on tls_verify.h beyond the MBEDTLS_X509_BADCERT_* bit
- * constants.
- *
- * Before forwarding: accumulates MBEDTLS_X509_BADCERT_* bits into
- * context->verify_result_flags so TLS_CERT_VERIFY_RESULT still reports
- * cert errors even on this path. Then swaps store->userCtx from our
- * tls_context back to the customer's registered ctx pointer so the
- * customer's callback sees what it registered; restores our context
- * on return so subsequent chain-position callbacks still find us.
- */
 static int tls_wolfssl_verify_cb_wrapper(int preverify_ok,
 					 WOLFSSL_X509_STORE_CTX *store)
 {
@@ -2880,18 +2817,17 @@ static int tls_wolfssl_verify_cb_wrapper(int preverify_ok,
 
 	context = (struct tls_context *)store->userCtx;
 
-	/* Accumulate flags for TLS_CERT_VERIFY_RESULT */
 	if (!preverify_ok && store->error != 0) {
 		context->verify_result_flags |=
 			tls_wolfssl_error_to_mbedtls_flags(store->error);
 	}
 
-	/* Forward to the application's wolfSSL-style callback with the
-	 * user-supplied context (may be NULL).
-	 */
 	user_cb = (VerifyCallback)context->options.cert_verify_wolfssl.cb;
 	user_ctx = context->options.cert_verify_wolfssl.ctx;
 
+	/* Swap userCtx so the customer callback sees its registered ctx,
+	 * restore ours afterwards for subsequent chain-position callbacks.
+	 */
 	store->userCtx = user_ctx;
 	ret = user_cb(preverify_ok, store);
 	store->userCtx = context;
@@ -2912,30 +2848,17 @@ static int tls_wolfssl_set_verify(struct tls_context *context)
 			break;
 		case TLS_PEER_VERIFY_OPTIONAL:
 			if (context->options.role == ZTLS_IS_SERVER) {
-				/* Server OPTIONAL: request client cert but
-				 * don't fail the handshake if absent.
-				 */
 				verifyLevel = WOLFSSL_VERIFY_PEER;
 			} else {
-				/* Client OPTIONAL: verify server cert but
-				 * allow handshake to continue on failure
-				 * (handled by the verify callback).
-				 */
 				verifyLevel = WOLFSSL_VERIFY_PEER;
 			}
 			break;
 		case TLS_PEER_VERIFY_REQUIRED:
 			if (context->options.role == ZTLS_IS_SERVER) {
-				/* Server REQUIRED: request client cert and
-				 * abort if the client doesn't provide one.
-				 */
 				verifyLevel = WOLFSSL_VERIFY_PEER |
 					      WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT |
 					      WOLFSSL_VERIFY_FAIL_EXCEPT_PSK;
 			} else {
-				/* Client REQUIRED: server always sends a cert,
-				 * so VERIFY_PEER alone is sufficient.
-				 */
 				verifyLevel = WOLFSSL_VERIFY_PEER;
 			}
 			break;
@@ -2946,32 +2869,18 @@ static int tls_wolfssl_set_verify(struct tls_context *context)
 
 	context->verify_result_flags = 0;
 
-	/*
-	 * Select the per-cert verify callback wolfSSL will invoke during
-	 * chain walk. Two possible callbacks on the wolfSSL backend:
-	 *
-	 *   tls_wolfssl_verify_cb_wrapper       (wolfSSL-style, customer cb)
-	 *   tls_wolfssl_verify_accumulate_cb    (flag-only, default)
-	 *
-	 * wolfSSL_SetCertCbCtx plants our tls_context so whichever cb is
-	 * chosen can reach verify_result_flags. The wolfSSL-style wrapper
-	 * swaps userCtx out again to hand the customer the ctx they
-	 * registered.
+	/* SetCertCbCtx plants tls_context so the chosen callback can reach
+	 * verify_result_flags.
 	 */
 #if defined(CONFIG_WOLFSSL_VERIFY_CALLBACK)
 	if (context->options.cert_verify_wolfssl.cb != NULL) {
-		/* Customer registered a wolfSSL-style callback. */
 		wolfSSL_SetCertCbCtx(context->wssl, context);
 		cb = tls_wolfssl_verify_cb_wrapper;
 	} else {
-		/* wolfSSL-style option built in, but customer did not
-		 * register one — use the flag-only accumulator.
-		 */
 		wolfSSL_SetCertCbCtx(context->wssl, context);
 		cb = tls_wolfssl_verify_accumulate_cb;
 	}
 #else
-	/* No customer-callback path built in — flag-only only. */
 	wolfSSL_SetCertCbCtx(context->wssl, context);
 	cb = tls_wolfssl_verify_accumulate_cb;
 #endif
@@ -3187,9 +3096,7 @@ static WOLFSSL_METHOD *tls_wolfssl_get_method(struct tls_context *context,
 #endif
 		case IPPROTO_TLS_1_1:
 		case IPPROTO_TLS_1_0:
-			/* Not supported: user_settings.h unconditionally
-			 * defines NO_OLD_TLS. Return NULL -> -ENOTSUP.
-			 */
+			/* user_settings.h defines NO_OLD_TLS. */
 			return NULL;
 		default:
 			return NULL;
@@ -3201,9 +3108,6 @@ static WOLFSSL_METHOD *tls_wolfssl_get_method(struct tls_context *context,
 		return is_server ? wolfDTLSv1_2_server_method()
 				 : wolfDTLSv1_2_client_method();
 #else
-		/* DTLS 1.2 methods not available when TLS 1.2 is disabled.
-		 * DTLS 1.3 is not yet supported in this integration.
-		 */
 		return NULL;
 #endif
 	}
@@ -3405,9 +3309,7 @@ static int tls_opt_hostname_set(struct tls_context *context,
 		return 0;
 	}
 
-	/* Allocate +1 to guarantee NUL termination — callers may pass
-	 * strlen(hostname) without the NUL (the main TLS test does). wolfSSL
-	 * APIs (check_domain_name, X509_check_host) require C strings. */
+	/* +1 for NUL — wolfSSL APIs require C strings. */
 	context->host_name = XMALLOC(optlen + 1, NULL, DYNAMIC_TYPE_TMP_BUFFER);
 	if (context->host_name == NULL) {
 		context->options.is_hostname_set = false;
@@ -3972,9 +3874,7 @@ static int tls_opt_cert_verify_result_get(struct tls_context *context,
 		uint32_t result = context->verify_result_flags;
 
 #if defined(OPENSSL_EXTRA) || defined(OPENSSL_EXTRA_X509_SMALL)
-		/* Merge wolfSSL's own result as a fallback for errors that
-		 * bypass the verify callback (internal chain building, etc.)
-		 */
+		/* Fallback for errors that bypass the verify callback. */
 		if (result == 0 &&
 		    wolfSSL_get_verify_result(context->wssl) != 0) {
 			result = MBEDTLS_X509_BADCERT_OTHER;
@@ -3997,10 +3897,7 @@ static int tls_opt_session_cache_purge_set(struct tls_context *context,
 	ARG_UNUSED(optlen);
 
 #if defined(CONFIG_WOLFSSL)
-	/* wolfSSL_CTX_flush_sessions() ignores ctx (ssl_sess.c:822 casts to
-	 * void) and flushes the global session cache, so match the mbedTLS
-	 * purge semantics and call it even before per-socket init.
-	 */
+	/* wolfSSL_CTX_flush_sessions ignores ctx and flushes the global cache. */
 	wolfSSL_CTX_flush_sessions(context->ctx, -1);
 #else
 	ARG_UNUSED(context);
@@ -4085,16 +3982,9 @@ static int tls_opt_dtls_role_set(struct tls_context *context,
 	return 0;
 }
 
-/*
- * Setter for TLS_CERT_VERIFY_CALLBACK — the mbedTLS-style cert-verify
- * callback option. Only honored by the mbedTLS backend; the wolfSSL arm
- * returns -ENOTSUP so applications cannot register a callback that
- * would never fire. wolfSSL consumers should use
- * TLS_CERT_VERIFY_CALLBACK_WOLFSSL (CONFIG_WOLFSSL_VERIFY_CALLBACK)
- * instead.
- */
 #if defined(CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK)
 #if defined(CONFIG_WOLFSSL)
+/* wolfSSL consumers should use TLS_CERT_VERIFY_CALLBACK_WOLFSSL. */
 static int tls_opt_cert_verify_callback_set(struct tls_context *context,
 					    const void *optval,
 					    socklen_t optlen)
@@ -4145,15 +4035,6 @@ static int tls_opt_cert_verify_callback_set(struct tls_context *context,
 }
 #endif /* CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK */
 
-/*
- * Setter for TLS_CERT_VERIFY_CALLBACK_WOLFSSL — the wolfSSL-style
- * cert-verify callback option. Customer's callback receives
- * WOLFSSL_X509_STORE_CTX* directly; no struct translation happens.
- * The only tls_verify.h dependency is the MBEDTLS_X509_BADCERT_* bit
- * constants that back TLS_CERT_VERIFY_RESULT. The mbedTLS-style
- * TLS_CERT_VERIFY_CALLBACK socket option is rejected with -ENOTSUP
- * under wolfSSL; wolfSSL users should use this option instead.
- */
 #if defined(CONFIG_WOLFSSL_VERIFY_CALLBACK)
 static int tls_opt_cert_verify_callback_wolfssl_set(struct tls_context *context,
 						    const void *optval,
@@ -5043,23 +4924,14 @@ static ssize_t recvfrom_dtls_common_wolfssl(struct tls_context *ctx, void *buf,
 				return ret;
 			}
 
-			/* Translate wolfSSL errors to POSIX codes so
-			 * callers do not pass them to wolfSSL_get_error().
-			 */
 			if (err == SOCKET_PEER_CLOSED_E ||
 			    err == WOLFSSL_ERROR_ZERO_RETURN) {
 				return -ENOTCONN;
 			}
 
-			/* DTLS server parity with the Zephyr 3.7 wolfSSL patch.
-			 * BUFFER_ERROR here means a prior peek in
-			 * ztls_socket_data_check() already absorbed a fatal
-			 * alert and called tls_wolfssl_reset(); the SSL object
-			 * has no more usable data. Surfacing EAGAIN (not EIO)
-			 * lets the server recv path report "no data right now"
-			 * so the caller can wait for the next session, matching
-			 * 3.7's server behavior. 3.7 did not map this for the
-			 * client, so the client path is left unchanged.
+			/* Server BUFFER_ERROR: a prior peek absorbed a fatal
+			 * alert and reset the SSL object. Surface EAGAIN so
+			 * the server can wait for the next session.
 			 */
 			if (err == BUFFER_ERROR &&
 			    ctx->options.role == ZTLS_IS_SERVER) {
@@ -5127,9 +4999,6 @@ static ssize_t recvfrom_dtls_client_wolfssl(struct tls_context *ctx, void *buf,
 		return ret;
 	}
 
-	/* recvfrom_dtls_common_wolfssl returns POSIX error codes:
-	 * -EAGAIN, -ENOTCONN (peer closed), -EIO (terminal).
-	 */
 	if (ret == -ENOTCONN) {
 		tls_wolfssl_reset(ctx);
 		ctx->error = ENOTCONN;
@@ -5195,9 +5064,6 @@ static ssize_t recvfrom_dtls_server_wolfssl(struct tls_context *ctx, void *buf,
 			return ret;
 		}
 
-		/* recvfrom_dtls_common_wolfssl returns POSIX error codes:
-		 * -EAGAIN, -ENOTCONN (peer closed), -EIO (terminal).
-		 */
 		if (ret == -ENOTCONN) {
 			tls_wolfssl_reset(ctx);
 			repeat = true;
@@ -5645,11 +5511,7 @@ static int ztls_socket_data_check(struct tls_context *ctx)
 
 			ret = tls_wolfssl_init(ctx, is_server);
 			if (ret < 0) {
-				/* Collapse to -ENOMEM to match the mbedTLS arm
-				 * for backend parity on the poll-path init-failure
-				 * report; more specific errors are intentionally
-				 * discarded here.
-				 */
+				/* Match mbedTLS arm — collapse to -ENOMEM. */
 				return -ENOMEM;
 			}
 		}
